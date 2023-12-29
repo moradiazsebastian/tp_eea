@@ -1,0 +1,406 @@
+---
+title: "Trabajo final. Modelos de regresion robustos"
+author: "Vicente S. Mora"
+date: "18 de diciembre de 2023"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  html_notebook:
+    toc: yes
+    toc_float: yes
+---
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+```{r}
+require("data.table")
+require("tidyverse")
+require("tidymodels")
+require("GGally")
+require("corrr")
+require("MASS")
+require("lubridate")
+require("caret")
+require("lmtest")
+require("gridExtra")
+
+path <- "C:/Users/Vicente Mora/Desktop/Maestria/EEA/trabajo_final"
+setwd(path)
+```
+# Introducción.
+
+La confianza en las instituciones gubernamentales es uno de los temas de mayor interés para la sociedad. Por este motivo, el gobierno de Brasil hizo disponibles varios conjuntos de datos y APIs que permiten analizar la actividad de distintos miembros de las instituciones legislativas. Esto es parte de una iniciativa para promover la transparencia y aumentar la credibilidad en las instituciones estadales. 
+
+En particular, en el presente trabajo se hizo foco en un dataset que registra las solicitudes de reembolso emitidas por miembros de la cámara de diputados de Brasil. La intención es realizar un análisis predictivo de los consumos mensuales de los diputados usando las solicitudes de reembolso, ajustando modelos de regresión robustos. Se escogió esta herramienta por la posible presencia de valores atípicos en la variable a predecir. El análisis se realizó en términos de las características del diputado, su afiliación política, género, edad de los diputados y los montos de solicitudes de reembolso emitidas previamente. 
+
+# Objetivos.
+
+El análisis realizado tiene los siguientes objetivos: 
+
+* Elaborar un modelo predictivo para los consumos mensuales de los miembros de la Cámara de Diputados de Brasil utilizando distintos modelos de regresión. Estos son: el modelo lineal simple, el modelo lineal múltiple y el modelo robusto.
+
+* Establecer una guía de como aplicar los modelos de regresión robustos y evaluar el cumplimiento de los supuestos de los modelos, intentando mostrar como el uso de los M-estimadores (particularmente la función de pesos de Huber) influye en el ajuste.  
+
+* Comparar las métricas de performance entre los modelos realizados.
+
+# Metodología.
+
+Como primera aproximación, empezamos por realizar un preprocesamiento de los datos donde enriquecemos el dataset a utilizar con información pertinente a las características de los diputados: cuanto tiempo llevan ejerciendo, a que partido político pertenece, qué edad y sexo tienen, partido e ideología política, entre otros. Una vez realizado el preprocesamiento y enriquecimiento, empezamos con el análisis exploratorio para decidir qué variables pueden resultar útiles en la construcción del modelo, visualizar outliers y determinar si necesitamos hacer limpieza de alguna de las variables. 
+
+Luego del análisis exploratorio, empezamos con la construcción de los modelos. Se generará un modelo lineal simple y uno múltiple. Se evaluarán los supuestos del modelo lineal múltiple generado y determinaremos si hace falta utilizar un modelo robusto. De ser así, se ajustará un modelo robusto y procederemos a comparar métricas entre los modelos generados. Como parte del análisis, también se pretende  realizar una breve interpretación de los modelos generados y los coeficientes resultantes. 
+
+### Preprocesamiento.
+
+El conjunto de datos utilizado fue generado de la unión de varias fuentes externas: 
+
+* El archivo "dirty_deputies_v2.csv" es un dataset que registra los reembolsos solicitados por miembros de la cámara de diputados de Brasil en el periodo comprendido entre 2015-2017. El mismo consta de 339089 registros y 23 variables, de las cuales la mayoría son categóricas de alta cardinalidad.  En total, se reportan los gastos de 584 diputados afiliados a distintos partidos que hacen vida en el panorama político brasileño. El dataset se encuentra disponible en: 
+https://www.kaggle.com/datasets/epattaro/brazils-house-of-deputies-reimbursements/code
+
+* El archivo "deputies_dataset.csv" es un dataset que también registra los reembolsos solicitados por miembros de la cámara de diputados de Brasil en el periodo comprendido entre 2009-2017. El mismo consta de 3014902 registros y 10 variables, de las cuales la mayoría son categóricas de alta cardinalidad. Es un dataset bastante parecido al primero, con la diferencia que es más limitado en términos de la información de partidos politicos que dispone, y tiene mayor cantidad de registros. Se encuentra disponible en:
+https://www.kaggle.com/datasets/epattaro/brazils-house-of-deputies-reimbursements/code
+
+* El archivo "deputados.csv" es un dataset que registra todos los diputados que en algún momento formaron parte - o que hacen vida actualmente - en la cámara de diputados de Brasil. El mismo cuenta con 7826 registros y 13 variables. El dataset se encuentra disponible en: 
+https://dadosabertos.camara.leg.br/swagger/api.html#staticfile
+
+* El archivo "legislaturas.csv" es un dataset que registra todas las fechas de inicio y fin de las distintas legislaturas celebradas en la cámara de diputados. Una legislatura es un periodo en el cual los diputados electos ejercen funciones. El dataset cuenta con 57 observaciones y 5 variables, y se encuentra disponible en:    
+https://dadosabertos.camara.leg.br/swagger/api.html#staticfile
+
+Se usó la información de partidos políticos disponible en "dirty_deputies_v2.csv" para extender la información de diputados. Se usaron columnas alusivas al nombre de los diputados para juntar "deputies_dataset.csv" y "deputados.csv". Se hizo join de "deputados.csv" y "legislaturas.csv" usando los Ids de legislaturas disponibles en ambos datasets. Asimismo, parte del análisis fue realizar un preprocesamiento de los datos, el cual se encuentra disponible en el archivo preprocesamiento_tp_final.R, donde se limpiaron datos con valores faltantes, y se realizó feature engineering con el objetivo de poder extraer más información para el ajuste.
+
+```{r}
+df <- read.csv("../datasets/deputies_grouped.csv")
+df_all <- read.csv("../datasets/deputies_extended.csv")
+  
+#se toma como set de test el ano 2017. Los demas meses seran usados para testing
+target_year <- "2017"
+df_train <- df[!grepl(target_year,df$receipt_date_year_month),]
+df_test <- df[grepl(target_year,df$receipt_date_year_month),]
+
+summary(df)
+```
+# Análisis exploratorio.
+Como variables categóricas resaltantes del dataset, tenemos: 
+
+* party_pg: es el partido político al que pertenece el diputado.
+
+* party_position: indica la inclinación política del partido al que pertenece el diputado. Puede ser Extrema izquierda, Extrema derecha, Centro, Centro izquierda y Centro derecha. 
+
+* siglaSexo: género de los diputados. Puede ser masculino o femenino.
+
+* company_name: nombre de la compañía donde se hizo el consumo por el cual se solicita el reembolso. 
+
+* refund_description: descripción y detalle del rubro en el cual se hizo el consumo. Algunos de los valores observados son "Combustible," "Viajes en avión," "Comida," entre otros.
+
+Las variables numéricas más relevantes que dispone el dataset, o que fueron generadas como parte del preprocesamiento son: 
+
+* receipt_value: Valor del reembolso solicitado por el diputado. Representa el monto de cada solicitud de reembolso emitida por cada diputado en una fecha específica.  
+
+* party_nmembers: número de integrantes del partido. Es la cantidad de miembros que tiene el partido politico al que pertenece el diputado. 
+
+* sum_refunds_per_month: es la variable a predecir. A grandes rasgos, es la suma de solicitudes de reembolso por mes, para cada diputado. Representa el total del monto de las solicitudes de reembolso emitidas por un diputado para un mes específico.  
+
+* n_refunds_per_month: número de reembolsos solicitados por mes. Representa la cantidad de solicitudes de reembolso en los distintos meses. 
+
+* deputy_age: representa la edad del diputado. 
+
+* service_months: tiempo transcurrido (en meses) desde el inicio de funciones del diputado y el mes en que se emiten las solicitudes de reembolso. 
+
+De esta manera, podemos ver que para cada registro de solicitud de reembolso podemos darnos una idea de los consumos de los diputados, en que comercio hizo el consumo, a qué rubro pertenece el comercio e intentar asociarlo con variables pertinentes al partido político o a información personal del individuo. 
+
+
+La división en train y test está basada en el año. Nos interesa saber cuantos registros tienen nuestros datos de test y de train respectivamente. Notamos que cada mes cuenta con al rededor de 500 registros, que es justamente el número de diputados de la cámara en cada periodo legislativo o "legislatura." En el modelo asumimos que la inflación asociada a los años considerados es constante, lo cual es una simplificación de la realidad. Se decidió armar el modelo predictivo usando el año y no prediciendo en un mes específico por la baja cantidad de datos que tenemos en cada mes, en relación con los datos de los demás meses. Al evaluar en un solo mes, es probable que perdamos variabilidad que si tenemos al evaluar en varios meses.  
+```{r, fig.width=15, fig.height=10}
+grouped_train <- df_train %>%
+  group_by(receipt_date_year_month) %>%
+  summarise(
+    n_records = n(),
+    receipt_date_year_month = receipt_date_year_month
+  ) %>%
+  distinct(receipt_date_year_month,n_records)
+
+grouped_test <- df_test %>%
+  group_by(receipt_date_year_month) %>%
+  summarise(
+    n_records = n(),
+    receipt_date_year_month = receipt_date_year_month
+  ) %>%
+  distinct(receipt_date_year_month,n_records)
+
+plot1 <- ggplot(grouped_train, aes(x = receipt_date_year_month, y = n_records)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+plot2 <- ggplot(grouped_test, aes(x = receipt_date_year_month, y = n_records)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+grid.arrange(plot1, plot2,   top = "Figura 1. Cantidad de registros por mes en train y test.", nrow = 2)
+```
+La variable objetivo del análisis es "sum_refunds_per_month," que es la suma de las solicitudes de reembolso emitidas por cada diputado en un mes dado. En la Figura 1, podemos ver la correlación de esta variable con las demás numéricas utilizadas, haciendo distinción por el género del diputado. A primera vista, vemos que los diputados de sexo masculino tienden a emitir más solicitudes de reembolso y a tener más outliers que las diputadas. Además, vemos que la correlación entre "sum_refunds_per_month" y "n_refunds_per_month" es de 0,229. Esto tiene sentido porque, a mayor cantidad de solicitudes de reembolso, mayor es el total de consumos en un mes dado. Mas allá de eso, no existen correlaciones relevantes entre "sum_refunds_per_month" y otras variables. 
+
+En el caso específico del valor del reembolso "receipt_value," notamos que nuevamente las correlaciones son por lo general bajas. Las mayores correlaciones se observan con la variable número de reembolsos solicitados por rubro (donde r=0.160) y con la variable número de reembolsos solicitados por mes (donde r=-0.119). 
+```{r, fig.width=10, fig.height=10}
+cols <- c(
+  "sum_refunds_per_month",
+  "siglaSexo",
+  "deputy_age",
+  "service_months",
+  "n_refunds_per_month", 
+  "party_nmembers"
+)
+
+df_target <- df_train[, cols]
+#Graficamos
+df_target %>% 
+  ggpairs(.,
+          mapping = aes(colour = siglaSexo),
+          title = "Figura 1. Correlacion entre variables.",
+          upper = list(continuous = wrap("cor"))) + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle=45), legend.position = "bottom")
+```
+En la Figura 2, podemos ver los valores de las solicitudes de reembolso según el partido político. En primera instancia, las solicitudes de reembolso se encuentran altamente concentradas en torno a valores bajos. Aunque el partido político no será utilizado por su alta cardinalidad, podemos ver que hay varios partidos políticos con una gran cantidad de outliers. En el gráfico de barras anexo a la Figura 2, podemos observar que el aumento en los outliers parece estar asociados a la cantidad de miembros del partido: a mayor cantidad de miembros, pareciera que es mayor la cantidad de outliers existe en las solicitudes de reembolso. En particular, resalta el caso del partido PRB, que con una poca cantidad de miembros es de los que más outliers con montos elevados tiene.
+```{r, fig.width=15, fig.height=10}
+grouped <- df_all %>%
+  group_by(political_party, party_nmembers) %>%
+  summarise()
+
+
+plot1 <- ggplot(df_all, aes(x = political_party, y = receipt_value)) +
+  geom_boxplot() + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+plot2 <- ggplot(grouped, aes(x = political_party, y = party_nmembers)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+grid.arrange(plot1, plot2,   top = "Figura 2. Monto de reembolsos y cantidad de miembros por partidos", nrow = 2)
+```
+De igual manera que para el caso anterior, generamos un gráfico de los valores de reembolso respecto a la inclinación política de los partidos a los que los diputados pertenecen, como se observa en la Figura 3. Como se mencionó arriba, las solicitudes de reembolso se encuentran altamente concentradas en torno a valores bajos. Vemos que las posiciones políticas con mayor cantidad y mayor monto en los valores atípicos son centro-izquierda, centro-derecha, centro, y extrema derecha. En varios de los casos, vemos que los valores atípicos se encuentran por encima de los 30,000 BRL, lo que equivale a los 8,640 USD (tasa 2016). En casos extremos, tenemos valores por encima de los 75,000 BRL, lo que equivale a 21,600 USD aproximadamente (tasa 2016).
+```{r, fig.width=15, fig.height=5}
+ggplot(df_all, aes(x = party_position, y = receipt_value)) +
+  geom_boxplot() + 
+  theme_minimal() +  
+  labs(title = "Figura 3. Monto de los reembolsos respecto a la posicion politica del partido.")
+```
+Concentrándonos en la variable objetivo, al graficar la suma de reembolsos por mes respecto a la ideología política del partido, vemos que los partidos de centro izquierda, centro derecha, centro, y extrema derecha son los que cuentan con mayor cantidad de valores atípicos, resaltando el caso de los partidos de centro, centro izquierda y centro derecha, donde los gastos mensuales pueden llegar a ser mayores a 100,000 BRL para algunos diputados, lo que equivale a 28,000 USD aproximadamente (tasa 2016).
+```{r, fig.width=15, fig.height=5}
+ggplot(df_train, aes(x = party_position, y = sum_refunds_per_month)) +
+  geom_boxplot() + 
+  theme_minimal() +  
+  labs(title = "Figura 4. Distribucion de los gastos mensuales")
+```
+Si nos enfocamos en la distribución de los outliers respecto al partido político, como se muestra en la figura 5, vemos que los partidos en los que los diputados emitieron solicitudes de reembolso más altas son el PMDB, PRB, y PT. Nuevamente, vemos que en algunos casos los consumos mensuales superan los 100,000 BRL. Sin embargo, en la mayoría de los casos vemos que las solicitudes de reembolso mensual tienen distribuciones idénticas. En el caso particular del partido PRRTB, vemos que por lo general las solicitudes de reembolso suelen ser más altas que las de los otros paridos, a pesar de que es un partido con muy pocos miembros.   
+```{r, fig.width=15, fig.height=10}
+grouped <- df_train %>%
+  group_by(political_party, party_nmembers) %>%
+  summarise()
+
+
+plot1 <- ggplot(df_train, aes(x = political_party, y = sum_refunds_per_month)) +
+  geom_boxplot() + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+plot2 <- ggplot(grouped, aes(x = political_party, y = party_nmembers)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+grid.arrange(plot1, plot2,   top = "Figura 5. Monto de reembolsos y cantidad de miembros por partidos", nrow = 2)
+```
+
+
+# Construcción de modelos.
+
+A partir de ahora, procederemos a crear, interpretar, evaluar y diagnosticar modelos de regresión. Los modelos considerados son el modelo lineal simple - que se utilizara como una especie de baseline - y el modelo de regresión múltiple y robusto. El objetivo de comparar los distintos modelos en términos de performance, y de como la elección del modelo afecta el cumplimiento de los supuestos que tienen que cumplir los modelos de regresión discutidos. Finalmente, aprovecharemos la ventaja explicativa de los modelos de regresión para tratar de entender que variables ayudan a predecir la suma de los reembolsos mensuales solicitados por los miembros de la Cámara de Brasil.  
+
+###  Modelo lineal simple.
+
+Para empezar con la construcción de modelos, primero ajustaremos un modelo lineal simple que usaremos como baseline para entender que tanto aportan los otros modelos que estamos considerando respecto al modelo simple, como se mencionó anteriormente. En este modelo, intentaremos calcular como varia la suma de las solicitudes mensuales de los reembolsos solicitados por los diputados respecto a la antigüedad (en meses) de los mismos. 
+
+```{r}
+# Creamos el primer modelo lineal e imprimimos los coeficientes.
+# GENERACION DE MODELOS: MODELO LINEAL SIMPLE                                  #
+modelo_lineal = lm(formula = sum_refunds_per_month ~ service_months, data = df_train)
+tidy(modelo_lineal)
+```
+Observamos que la antigüedad (en meses) del diputado no tiene mucha relevancia a la hora de explicar la variabilidad del monto total de las solicitudes de reembolso mensuales por diputado dado que el coeficiente $R^2_{adj}$ es casi nulo. El intercepto $\hat{\beta_0}$ sugiere que un diputado recién iniciado en funciones hace solicitudes de reembolso mensuales por al menos unos 31721.2327 BRL en promedio (unos 9000 USD aproximadamente). La pendiente  $\hat{\beta_1}$ sugiere que, con cada mes que pasa desde que iniciaron funciones los diputados, los montos de solicitudes de reembolso mensuales disminuyen -5.571 BRL en promedio, lo cual no es mucho. Si bien el p-valor de la pendiente es muy cercano a 0 y por lo tanto significativo, vemos que hacen falta otras variables explicativas para modelar el fenómeno de forma mas completa. 
+
+###  Modelo lineal múltiple.
+
+Procedemos a ajustar un modelo lineal múltiple con el objetivo de evaluar el cumplimiento de los supuestos usando la función de costo de mínimos cuadrados, y obtener las métricas de performance resultantes. Mas adelante haremos una comparación de estos resultados con los del modelo robusto. Las variables a elegir, junto con las razones por las cuales se escogió dicha variable, se describen a continuación:
+
+* n_refunds_per_months: se escogió porque queremos tener una noción de cuantos recibos emite el diputado mensualmente. Es racional pensar que a mayor cantidad de solicitudes de reembolso por mes, mayor será el monto de dichas solicitudes de reembolso. Parece tener una alta correlación con la variable objetivo.  
+
+* party_position y party_nmembers: se escogieron estas dos variables porque, del análisis exploratorio, parece haber una correlación entre altos consumos mensuales, la ideología política y la cantidad de miembros de los partidos. Incluir el entorno político en el que se mueve el diputado también puede aportar a la variabilidad explicada por el modelo. 
+
+* service_months y deputy_age: se escogieron estas dos variables porque queremos incluir variables que aporten información personal del diputado. En este caso, aportan información de la edad del diputado y cuanto tiempo llevan en el puesto. 
+
+No se tomó en consideración la variable sexo, porque no parecen haber diferencias significativas entre las solicitudes presentadas por diputados de distinto sexo. 
+
+```{r}
+# Creamos el primer modelo lineal e imprimimos los coeficientes.
+# GENERACION DE MODELOS: MODELO LINEAL MULTIPLE                                #
+modelo_multiple = lm(formula = sum_refunds_per_month ~ n_refunds_per_month + party_position + party_nmembers + service_months + deputy_age, data=df_train)
+tidy(modelo_multiple, conf.int = TRUE)
+```
+En este modelo el intercepto enmascara la suma de los reembolsos emitidos mensualmente para diputados que pertenecen a partidos políticos en el cual la ideología política es "Centre." Podemos esperar un diputado de centro, sin reembolsos emitidos, sin meses de antigüedad en el cargo y sin edad emita reembolsos de 35406.93 BRL mensualmente en promedio (unos 10000 USD aproximadamente), lo cual es un monto que ya de por sí es bastante alto. Vemos que los otros coeficientes asociados a otras ideologías políticas tienden a disminuir el promedio de la suma de los reembolsos mensuales solicitados. Asimismo, notamos lo siguiente respecto a las demás variables: 
+
+* Un incremento de la cantidad de recibos emitida por un diputado en particular "n_refunds_per_month," dejando fijas las otras variables, resulta en un aumento promedio de 172.20 BRL por cada solicitud de reembolso emitida. Es decir que en promedio, los valores más altos de "sum_refunds_per_month" están asociados a diputados que realizan pocos consumos mensuales, de alto valor.
+
+* Por otro lado, en términos de la influencia de la ideología política de los partidos en los que los diputados hacen vida, observamos que tienden a disminuir el valor promedio de la suma de los montos de reembolsos emitidos mensualmente. Las posiciones políticas que resaltan son: incrementar en la covariable party_positionCentreright dejando las otras variables fijas, la suma de los reembolsos disminuye, en promedio, -882.8908 BRL. De manera similar, si aumentamos party_positionLeftwing dejando las otras variables fijas, notamos que la suma de los reembolsos disminuye -5601.291 BRL en promedio. 	
+
+* Aumentar la cantidad de miembros del partido dejando las otras variables fijas no genera impactos significativos en el promedio de la suma de las solicitudes de reembolso mensuales emitidas por los diputados, dado que solo disminuye este valor por -0.0005 BRL. A pesar de esto, la variable sigue siendo significativa. 
+
+* Al aumentar los meses de servicio dejando fijas las demás variables, vemos que en promedio las solicitudes de reembolso mensuales disminuyen en 9.0175 BRL. Es decir, diputados con mayor antiguedad tienden a emitir en promedio solicitudes de reembolso de mayor valor. 
+
+* Al aumentar la edad del diputado de servicio dejando fijas las demás variables, vemos que en promedio las solicitudes de reembolso mensuales disminuyen en -200.8894 BRL. Es decir, diputados de mayor edad tienden a emitir menos consumos mensualmente.
+
+Mas allá de la interpretación de los coeficientes, vemos que todas las variables explicativas elegidas para ajustar el modelo resultan significativas, dado que tienen p-valores por lo general muy cercanos a 0. Asimismo, en este modelo particular vemos que $R^2_{adj}$ = 0.1051, con lo cual podemos decir que el 10% de la variabilidad de la suma de los reembolsos por mes es explicada por el modelo, lo cual es bastante superior al modelo lineal generado inicialmente. Notamos que el valor del p-valor resultante de aplicar un test F-score es bastante cercano a 0, lo que nos indica que al menos una de las variables consideradas en el modelo resulta significativa.     
+
+#### Diagnóstico del modelo.
+
+Dado que el modelo lineal múltiple sigue la siguiente expresión: 
+$$\hat{Y_i} = \hat{\beta_0} + \hat{\beta_1}X_{i1} + \hat{\beta_1}X_{i2} + \cdots + \hat{\beta_k}X_{ik} + e_i,$$
+Para decir que el ajuste resultante del modelo lineal es confiable, los residuos $e_i$ tienen que cumplir los siguientes supuestos:
+
+* Los $\epsilon_i$ tiene media cero, $E (\epsilon_i) = 0.$
+* Los $\epsilon_i$ tienen todos la misma varianza desconocida que llamaremos $\sigma^2$  y que es el otro parámetro del modelo. $Var (\epsilon_i) = \sigma^2$  (homocedasticidad).
+* Los $\epsilon_i$ tienen distribución normal.
+* Los $\epsilon_i$ son independientes entre sí, y son no correlacionados con las $X_i$
+
+Para determinar si el modelo generado satisface estos supuestos, usaremos gráficos cruzados asociados a los residuos del modelo. En este caso, los residuos hacen referencia a la diferencia entre el valor observado y el valor predicho. Notamos que: 
+
+* El gráfico de los residuos vs los valores predichos (Residuals vs Fitted) muestra que la varianza parece mostrar una estructura bien definida: podríamos decir que hay un tramo en particular en el cual incrementa la varianza a medida que aumentan los valores predichos, y que parece haber una relación lineal entre los residuos y los valores ajustado. De aquí, podemos inferir que el supuesto de homogeneidad de varianzas (homoscedasticidad) no se satisface. Se observa algo similar en el gráfico de y Scale-Location.
+
+* El gráfico de Normal Q-Q muestra que en los extremos los valores de los residuos estandarizados se alejan de forma significativa de la distribución teórica normal en especial para valores de cuantil teórico altos. De este comportamiento, podemos inferir que los residuos no cumplen el supuesto de normalidad. 
+
+* El gráfico de los residuos vs. la palanca (Residuals vs Leverage) muestra que hay varios de puntos con altos valores de residuos y varios puntos con alto leverage. Algo en particular que llama la atención es que existe una nube separada de puntos que tienen valores de alto leverage, y residuos estandarizados relativamente bajos. Estos puntos pueden estar influyendo en los coeficientes calculados por el modelo de regresión múltiple. La mayor distancia de Cook observada en los datos es de 0.01054, lo cual puede estar ocasionando que la curva de ajuste se desvíe hacia estos puntos de alto leverage. 
+```{r}
+#distancias de Cook
+cook_dist <- cooks.distance(modelo_multiple)
+max(cook_dist)
+#graficos de residuos
+plot(modelo_multiple)
+```
+Con estos gráficos concluimos que, al no cumplirse los supuestos de normalidad y homoscedasticidad, y al haber puntos de alto leverage, conviene aplicar un modelo de regresión robusto. 
+
+###  Modelo robusto
+
+Procedemos a aplicar el modelo robusto en el set de datos.
+```{r}
+# Creamos el primer modelo lineal e imprimimos los coeficientes.
+# GENERACION DE MODELOS: MODELO LINEAL ROBUSTO                                 #
+modelo_robusto_huber = MASS::rlm(
+  formula = sum_refunds_per_month ~ n_refunds_per_month + party_position + service_months + deputy_age + party_nmembers, 
+  data=df_train,
+  psi=psi.huber, 
+  method = "M", 
+  maxit=200
+  ) 
+
+tidy(modelo_robusto_huber, conf.int = TRUE)
+```
+Para aplicar el modelo de regresión robusto, usamos la función $\texttt{rlm}$ del paquete $\texttt{MASS}.$ En este caso, la función de costo a optimizar es la función de costo de Huber. Vemos que los nuevos coeficientes tienen por lo general menor error y mayor precisión que los coeficientes generados por el modelo múltiple. Asimismo, los parámetros del modelo resultan ser bastante distintos a los del modelo múltiple, con lo cual podemos decir que en el primer caso, es posible que haya observaciones atípicas que ocasionaban una estimación errónea de los parámetros del modelo. Una de las cosas que más resalta es que la cantidad de miembros del partido ya no es una variable significativa para el modelo. 
+
+Las diferencias entre los dos modelos también se evalúan al usar los métodos gráficos para el diagnóstico del cumplimiento de supuestos del modelo. En primera instancia, vemos que los gráficos de Residuals vs Fitted y el gráfico de Normal Q-Q son bastante similares a los gráficos del modelo múltiple. No se cumplen los criterios de normalidad ni homoscedasticidad. Sin embargo, a diferencia del modelo de regresión múltiple, vemos que el gráfico de Residuals vs Leverage muestra que, si bien siguen habiendo puntos de alto leverage notablemente separados, ahora los residuos estandarizados parecen mostrar menor dispersión y ser más cercanos al 0. Asimismo, la curva de distancia de Cook (curva roja) también se mantiene bastante cercana al 0 para todos los valores de leverage graficados. Estas dos características evidenciadas en los gráficos parecen indicar que el modelo robusto, como se esperaba, le asigna un menor peso a las observaciones con altos residuos. 
+```{r}
+plot(modelo_robusto)
+```
+
+# Métricas de performance 
+
+#### Evaluación en train
+
+```{r}
+# evaluacion en train
+# robusto
+evaluacion_robusto = broom::augment(modelo_robusto_huber, df_train)
+
+metricas_robusto_train = metrics(data = evaluacion_robusto, truth = sum_refunds_per_month, estimate = .fitted) %>% 
+  mutate(.estimate = round(.estimate, 4))
+
+metricas_robusto_train$.metric <- paste0(metricas_robusto_train$.metric,"_robusto")
+
+# evaluacion en train
+# multiple
+evaluacion_multiple = broom::augment(modelo_multiple, df_train)
+
+metricas_multiple_train = metrics(data = evaluacion_multiple, truth = sum_refunds_per_month, estimate = .fitted) %>% 
+  mutate(.estimate = round(.estimate, 4))
+
+metricas_multiple_train$.metric <- paste0(metricas_multiple_train$.metric,"_multiple")
+  
+resultado <- rbind(metricas_robusto_train, metricas_multiple_train) %>%
+  arrange(.metric)
+
+resultado
+```
+Procedemos entonces a evaluar el modelo múltiple y el modelo robusto en el set de entrenamiento y el de validación. Las métricas a evaluar son $R^2,$ RMSE y el MAE. Se sabe que el error RMSE proporciona mayor peso a residuos grandes al calcular la raíz cuadrada del residuo al cuadrado. El RMSE es sensible a outliers y puede ser influenciado por valores atípicos. En cambio, la métrica MAE trata todos los residuos igual sin importar la magnitud del mismo. Es menos sensible a outliers y proporciona una alternativa mas robusta para evaluar accuracy cuando tratamos con datos con valores atípicos. De esta manera, parte de lo esperado es que los valores de MAE sean consistentemente menores que los de RMSE. 
+
+Al hacer la evaluación en el set de entrenamiento, notamos que la métrica de RMSE es un poco más alta para el modelo robusto. Esto es de esperar porque, al optimizar la función de costos de mínimos cuadrados, el modelo lineal múltiple ajusta los coeficientes para lograr minimizar el error cuadrático medio. Como vimos en los ejemplos anteriores, el modelo múltiple tiende estimar los coeficientes de manera tal que el modelo resultante queda lo mas cercano posible a los valores atípicos, con lo cual es esperable que el RMSE sea menor que el RMSE del modelo robusto. 
+
+Por otro lado, vemos que al evaluar en el set de entrenamiento, la métrica de MAE es menor para el modelo robusto. Esto ocurre porque, como se explicó anteriormente, MAE se presenta como una métrica de performance más robusta ante valores atípicos. Era de esperar que MAE fuera menor para el modelo robusto, ya que el mismo asigna menores pesos a residuos grandes cuando estima los coeficientes. Finalmente, en términos del $R^2,$ notamos que ambos modelos explican un 10% de la variabilidad del fenómeno aproximadamente, lo cual es una mejoría considerable respecto al modelo lineal simple. 
+
+#### Evaluación en test
+```{r}
+# evaluacion en test
+# robusto
+models <- list(
+  modelo = modelo_robusto
+)
+
+lista_predicciones_testing = map(
+  .x = models, 
+  .f = augment, 
+  newdata = df_test
+) 
+
+metricas_robusto_test = lista_predicciones_testing$modelo %>% 
+  metrics(truth=sum_refunds_per_month, estimate=.fitted) %>%
+  mutate(.estimate=round(.estimate, 4))
+
+metricas_robusto_test$.metric <- paste0(metricas_robusto_test$.metric,"_robusto")
+
+# evaluacion en test
+# multiple
+models <- list(
+  modelo = modelo_multiple
+)
+
+lista_predicciones_testing = map(
+  .x = models, 
+  .f = augment, 
+  newdata = df_test
+) 
+
+metricas_multiple_test = lista_predicciones_testing$modelo %>% 
+  metrics(truth=sum_refunds_per_month, estimate=.fitted) %>%
+  mutate(.estimate=round(.estimate, 4))
+
+metricas_multiple_test$.metric <- paste0(metricas_multiple_test$.metric,"_multiple")
+
+
+resultado <- rbind(metricas_multiple_test, metricas_robusto_test) %>%
+  arrange(.metric)
+
+resultado
+```
+Posteriormente, evaluamos los modelos generados en el dataset de test. Notamos que, en general, la performance del modelo robusto es menor que la del modelo lineal múltiple; sin embargo, logra explicar mayor porcentaje de la variabilidad. Como se explicó anteriormente, esto es debido a que el modelo múltiple no penaliza residuos altos, con lo cual al hacer el ajuste, los valores atípicos tienden a atraer la curva de regresión, generando un menor residuo y por ende una menor métrica de error. Otra cosa que es de notar es que al evaluar en test, el valor de $R^2$ es mayor al observado en train. Esto nos dice que la variabilidad de los datos en el set de entrenamiento es mayor que la variabilidad de los datos en el set de test. 
+
+# Conclusiones
+
+En términos interpretativos de los modelos realizados, vemos que si existe una influencia significativa entre características inherentes a los partidos políticos, características personales del diputado y la cantidad de reembolsos solicitados por cada diputado mensualmente, siendo la covariable mas influyente la ideología asociada al partido político. Sería interesante en estudios futuros, también incluir otros datos como la formación profesional, si el diputado viene de una familia bien acomodada, entre otros factores que puedan ayudar a modelar los consumos mensuales. 
+
+En términos de los modelos utilizados, vemos que es conveniente utilizar el modelo robusto en presencia de outliers cuando sabemos que el dataset a analizar contiene outliers. El no usarlo, puede ocasionar interpretaciones y predicciones erróneas del modelo generado.   
+
